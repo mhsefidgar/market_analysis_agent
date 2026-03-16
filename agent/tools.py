@@ -126,6 +126,11 @@ class ToolRegistry:
 # -----------------------------
 
 def get_default_registry() -> ToolRegistry:
+    """
+    Creates and returns a pre-configured ToolRegistry populated with 
+    a standard suite of analysis tools (Web Scraper, Sentiment, 
+    Market Trends, and Report Generation).
+    """
     registry = ToolRegistry()
     registry.register(WebScraperTool())
     registry.register(SentimentAnalyzerTool())
