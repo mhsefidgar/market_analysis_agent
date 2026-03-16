@@ -1,3 +1,7 @@
+# ---------------------------------------------------
+# ----The current code uses the strategy pattern ----
+# ---------------------------------------------------
+
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Type
 from pydantic import BaseModel, Field
@@ -116,6 +120,10 @@ class ToolRegistry:
 
     def get_all_openai_schemas(self) -> list[Dict[str, Any]]:
         return [tool.get_openai_schema() for tool in self.tools.values()]
+        
+# -----------------------------       
+# ----- registery pattern -----
+# -----------------------------
 
 def get_default_registry() -> ToolRegistry:
     registry = ToolRegistry()
