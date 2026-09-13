@@ -1,106 +1,196 @@
-# E-commerce Market Analysis Agent
+# Market Analysis Agent
 
-An intelligent agent designed to orchestrate multiple tools and produce comprehensive strategic reports on specific products or markets.
+A production-oriented e-commerce market analysis agent built with **FastAPI, Pydantic, and native LLM tool calling**. The system accepts an analysis request, orchestrates specialized tools, records an execution trace, and returns a structured market report.
 
-## Architecture & Implementation Choices
+## Why this project?
 
-### Native Approach vs. Frameworks
-This project relies on a **Native Framework approach** built directly in Python utilizing `FastAPI`, `Pydantic`, and the `OpenAI API SDK` (which natively supports function calling).
+This project demonstrates AI-engineering patterns beyond a prompt demo:
 
-**Justification:**
-1. **Clarity over Complexity:** Many popular agent frameworks (LangGraph, CrewAI) introduce heavy abstractions and black-box components that can complicate debugging and restrict custom logic.
-2. **Standardization:** Using the OpenAI function calling schema as the interface allows seamless swapping of underlying models (OpenAI, DeepSeek, Anthropic, OpenRouter) with minimal adjustments.
-3. **Ease of Maintenance:** The orchestrator loop explicitly handles tool dispatch and result injection, allowing developers to see exactly how and when external calls are made.
+- Native tool-calling orchestration with explicit control flow
+- Pydantic validation for tool arguments and API contracts
+- Bounded agent execution to prevent infinite loops
+- Resilient tool failures fed back into the model as structured errors
+- Async API with `202 Accepted` task lifecycle
+- Per-tool execution tracing and latency measurement
+- Health endpoint and typed API responses
+- Docker-ready deployment
+- Automated tests
 
----
+> **Important:** The current bundled tools are deterministic demo adapters that simulate external data sources. They are intentionally isolated behind the `Tool` interface so real pricing, reviews, news, or market-data providers can be added without changing the orchestrator.
 
-## Advanced Architecture & Features
+## Architecture
 
-This project implements several production-grade patterns designed to fulfill the **Advanced Features** and **LLM Integration** criteria:
+```text
+Client
+  |
+  v
+FastAPI /api/v1/analyze
+  |
+  +--> 202 + task_id
+  |
+  v
+MarketAnalysisOrchestrator
+  |
+  +--> LLM tool selection
+  |       |
+  |       +--> WebScraperTool
+  |       +--> SentimentAnalyzerTool
+  |       +--> MarketTrendAnalyzerTool
+  |       +--> ReportGeneratorTool
+  |
+  +--> validation + error recovery
+  +--> execution trace / latency
+  |
+  v
+AgentResponse
+  |
+  +--> report
+  +--> tool_calls_made
+  +--> execution_trace
+```
 
-- **Native ReAct Orchestration**: A custom-built Reasoning and Acting loop (`agent/orchestrator.py`) allowing the agent to dynamically react to tool outputs and "self-correct" if a tool returns an error.
-- **Automatic Tool Schema Mapping**: Utilizes Pydantic's metadata to automatically generate OpenAI-compliant JSON schemas for tool arguments. This significantly improves **DX (Developer Experience)** by enabling "plug-and-play" tool registration.
-- **Asynchronous Task Architecture**: Implements a `202 Accepted` pattern for long-running LLM analyses. Analysis requests are processed as **FastAPI Background Tasks**, preventing timeouts and decoupling the request/response lifecycle.
-- **Resilient Tool Dispatch**: Every tool execution is wrapped in a fail-safe block. Errors are caught and fed back into the LLM context, enabling the agent to handle tool failures (e.g., a blocked scraper) gracefully rather than crashing.
+## API
 
----
+### Submit an analysis
 
-## Installation & Usage
-
-### 1. Local Setup
-
-**Requirements:** Python 3.13+, Git
-
-1. Clone the repository:
 ```bash
-git clone <your-repo-link>
+curl -X POST http://localhost:8000/api/v1/analyze \
+  -H "Content-Type: application/json" \
+  -d '{
+    "product_name": "Sony WH-1000XM5",
+    "competitors": ["Bose QuietComfort Ultra", "AirPods Max"],
+    "market_segment": "Premium wireless headphones"
+  }'
+```
+
+The endpoint returns `202 Accepted` with a `task_id`.
+
+### Poll the result
+
+```bash
+curl http://localhost:8000/api/v1/analyze/<task_id>
+```
+
+### Health check
+
+```bash
+curl http://localhost:8000/health
+```
+
+Interactive API documentation is available at `/docs`.
+
+## Example response shape
+
+```json
+{
+  "task_id": "...",
+  "status": "completed",
+  "result": {
+    "report": "...",
+    "tool_calls_made": 4,
+    "execution_trace": [
+      {
+        "tool_name": "web_scraper",
+        "status": "success",
+        "duration_ms": 501.2
+      }
+    ]
+  }
+}
+```
+
+## Engineering decisions
+
+### Native orchestration instead of a heavy agent framework
+
+The orchestration loop is intentionally implemented directly against the OpenAI-compatible tool-calling API. This keeps tool dispatch, validation, failure handling, and iteration limits visible and testable.
+
+### Bounded execution
+
+Every request has a configurable maximum number of agent iterations. This prevents accidental infinite tool loops and gives a clear failure mode when the model cannot finish an analysis.
+
+### Tool isolation
+
+Each capability implements the same `Tool` interface and exposes a Pydantic argument schema. A production implementation can replace the demo scraper with a marketplace API, replace the sentiment adapter with a review pipeline, or add financial/news tools without rewriting the orchestrator.
+
+### Observability
+
+Each tool call records:
+
+- tool name
+- success/failure status
+- execution latency
+- error information when applicable
+
+The next production step is exporting this trace to OpenTelemetry/Langfuse and recording token usage, model latency, cost, and end-to-end task duration.
+
+## Production roadmap
+
+1. Replace simulated tools with real provider adapters.
+2. Persist tasks and results in PostgreSQL/Redis instead of process memory.
+3. Move long-running work to a durable queue such as Celery/RQ/Redis Streams.
+4. Add retrieval and source citation support for every market claim.
+5. Add an evaluation dataset with retrieval, tool-selection, factuality, latency, and cost metrics.
+6. Add OpenTelemetry/Langfuse tracing and Prometheus metrics.
+7. Add authentication, rate limiting, retries, circuit breakers, and provider timeouts.
+8. Add CI/CD and deploy the API as a containerized service.
+
+## Local development
+
+Requirements: Python 3.13+, Git
+
+```bash
+git clone https://github.com/mhsefidgar/market_analysis_agent.git
 cd market_analysis_agent
-```
-2. Set up the virtual environment:
-```bash
-python -m venv venv
-# On Windows:
-venv\Scripts\activate
-# On Linux/Mac:
-source venv/bin/activate
-```
-3. Install dependencies:
-```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\\Scripts\\activate
 pip install -r requirements.txt
 ```
-4. Set Environment Variables:
-Create a `.env` file in the root directory:
+
+Create `.env`:
+
 ```env
-OPENAI_API_KEY=your-api-key-here
-# Optional overriding for other providers:
+OPENAI_API_KEY=your-api-key
+MODEL_NAME=gpt-4o-mini
+# Optional OpenAI-compatible endpoint:
 # OPENAI_BASE_URL=https://openrouter.ai/api/v1
-# MODEL_NAME=anthropic/claude-3-haiku
 ```
 
-### 2. Running the API
+Run:
 
-Start the FastAPI server:
 ```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
-Visit `http://localhost:8000/docs` to interact with the Swagger API interface.
 
-### 3. Docker Containerization
+Run tests:
 
-To deploy using Docker:
 ```bash
-docker-compose up --build -d
+pytest -q
 ```
-The API will be available at `http://localhost:8000`.
 
----
+## Docker
 
-## Theoretical Questionnaire
+```bash
+docker compose up --build
+```
 
-### 1. Data Architecture and Storage
-**Schema Design**:
-- `AnalysisRequest`: Original request data.
-- `ToolExecutionHistory`: Logs of which tools were called, inputs, and outputs.
-- `AnalysisResult`: Final compiled insights.
+## Project structure
 
-**Recommended System**:
-- **PostgreSQL**: For persistent storage of users, request history, and analysis records. It natively supports JSONB schemas which is ideal for storing dynamic tool execution histories and AI outputs.
-- **Redis (Cache layer)**: To store recently queried raw data (e.g., product pricing and sentiment metrics). Instead of hitting web scrapers multiple times for the same product in a short window, Redis provides fast intermediate lookups.
+```text
+market_analysis_agent/
+├── agent/
+│   ├── models.py          # API/domain models
+│   ├── orchestrator.py    # LLM + tool-calling loop
+│   └── tools.py           # Tool interface and adapters
+├── tests/
+│   ├── test_agent.py
+│   └── test_tools.py
+├── main.py                # FastAPI application
+├── requirements.txt
+├── Dockerfile
+└── README.md
+```
 
-### 2. Monitoring and Observability
-- **Execution Tracing (Tracing):** Integrate **OpenTelemetry** or **Langfuse**. This allows us to trace the complete chain: API invocation -> Orchestrator loops -> Tool executions -> LLM responses.
-- **Performance Metrics:** Using **Prometheus** + **Grafana** to monitor response times, error rates (e.g., failed scraping), and LLM latency.
-- **Alerting:** Set up trigger-based alerts in **PagerDuty** or Slack for high failure rates (e.g., API limits reached or 500 status codes).
-- **Key Metrics to Monitor:** Number of tool calls per request (prevents loops), LLM token usage, analysis duration, and tool success rate.
+## Status
 
-### 3. Scaling and Optimization
-- **Load Peaks (100+ simultaneous queries):** Use Celery or RabbitMQ to build an async task queue. The FastAPI endpoints already return `202 Accepted` returning a `task_id`. Background workers can process analyses safely scaling horizontally decoupled from incoming traffic.
-- **Optimizing LLM Costs:** Use prompt caching (supported by Anthropic & OpenAI) to reuse instructions. Route simple reasoning (like deciding which tools to call) to cheaper/faster models (e.g., GPT-4o-mini or Claude Haiku) and reserve complex reasoning (report generation) for heavier models.
-- **Intelligent Caching:** Cache tool outputs. If a "Sentiment Tool" was run for "iPhone 15" within the last 24hrs, return the cached result instead of re-processing.
-- **Parallelization:** Tools that do not depend on each other (e.g. `web_scraper` and `sentiment_analyzer`) can be executed concurrently using `asyncio.gather`. 
-
-### 4. Continuous Improvement and A/B Testing
-- **LLM as a Judge:** Periodically sample generated reports and pass them to an independent LLM (e.g., GPT-4) armed with a rubric evaluating formatting, data accuracy, and insightfulness.
-- **A/B Testing Prompts:** Use an experiment tracking tool like **LangSmith**. Direct 50% of the traffic to the V1 system prompt and 50% to V2. Evaluate which variant takes fewer tool calls (latency) or scores higher on the LLM judge proxy.
-- **Feedback Loop:** Expose a `POST /analyze/{task_id}/feedback` endpoint for end-users to provide a thumbs up/down and text feedback. Store this for fine-tuning.
-- **Evolving Capabilities:** Incrementally add new tools to the `ToolRegistry` (e.g., RedditScraper, CompetitorPricingAPI). The agent natively scales its capabilities just by exposing the new tools via the function call schema.
+The repository is a reference implementation for an AI-engineering portfolio project. The orchestration, API contracts, validation, bounded execution, and tracing are production-oriented; external market-data integrations and durable infrastructure remain roadmap items.
