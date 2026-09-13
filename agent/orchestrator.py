@@ -1,91 +1,135 @@
 import json
 import os
-from typing import Dict, Any, List
+import time
+from typing import Any, List, Optional
+
 from openai import AsyncOpenAI
-from .tools import get_default_registry, ToolRegistry
-from .models import AgentResponse
+
+from .models import AgentResponse, ToolExecution
+from .tools import ToolRegistry, get_default_registry
+
 
 class MarketAnalysisOrchestrator:
-    def __init__(self, model: str = "gpt-4o-mini", registry: ToolRegistry = None):
-        # Allow configuring via environment variables for various providers
-        api_key = os.getenv("OPENAI_API_KEY", "dummy-key-for-testing")
-        base_url = os.getenv("OPENAI_BASE_URL", None)
-        
-        self.client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+    """Tool-calling agent with bounded execution and observable tool traces."""
+
+    def __init__(
+        self,
+        model: str = "gpt-4o-mini",
+        registry: Optional[ToolRegistry] = None,
+        max_iterations: int = 8,
+    ):
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is required")
+
+        self.client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=os.getenv("OPENAI_BASE_URL") or None,
+        )
         self.model = os.getenv("MODEL_NAME", model)
         self.registry = registry or get_default_registry()
+        self.max_iterations = max_iterations
         self.system_prompt = """
-You are an expert E-commerce Market Analysis Agent.
-Your goal is to provide comprehensive strategic reports on specific products or markets.
-You have access to several specialized tools:
-- web_scraper: Collects prices and product information.
-- sentiment_analyzer: Analyzes customer reviews.
-- market_trend_analyzer: Analyzes price and popularity trends.
-- report_generator: Compiles raw data into a structured report.
+You are an expert e-commerce market analysis agent.
 
-Follow these steps to complete an analysis request:
-1. Use web_scraper to gather base product data.
-2. Use sentiment_analyzer to understand customer perception.
-3. Use market_trend_analyzer (with the appropriate category) to understand the landscape.
-4. Pass all gathered insights to the report_generator tool to create the final synthesized report.
-5. Return the generated report to the user summarizing your actions.
+Produce evidence-based strategic analysis. Use tools for every factual claim that
+requires external or computed data. Never invent prices, ratings, trends, reviews,
+or competitor facts. If a tool fails, acknowledge the missing evidence instead of
+fabricating a replacement.
 
-Always use the tools to gather data. Do not make up product data.
-"""
+Workflow:
+1. Collect product/pricing evidence.
+2. Collect customer sentiment evidence.
+3. Analyze the relevant market category.
+4. Synthesize the evidence into a concise executive report.
+5. Clearly distinguish observed data, inference, and recommendations.
+""".strip()
 
-    async def run_analysis(self, product_name: str, competitors: List[str] = None, market_segment: str = None) -> AgentResponse:
-        competitors_str = ", ".join(competitors) if competitors else "None"
-        market_segment_str = market_segment if market_segment else "General"
-        
-        user_msg = f"Please analyze the following product: {product_name}.\nCompetitors: {competitors_str}.\nMarket segment: {market_segment_str}."
-        
-        messages = [
+    async def run_analysis(
+        self,
+        product_name: str,
+        competitors: Optional[List[str]] = None,
+        market_segment: Optional[str] = None,
+    ) -> AgentResponse:
+        competitors_str = ", ".join(competitors or []) or "None"
+        segment_str = market_segment or "General"
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": user_msg}
+            {
+                "role": "user",
+                "content": (
+                    f"Analyze product: {product_name}\n"
+                    f"Competitors: {competitors_str}\n"
+                    f"Market segment: {segment_str}"
+                ),
+            },
         ]
-        
+
         tools_schema = self.registry.get_all_openai_schemas()
-        
         tool_calls_made = 0
-        final_report = "Analysis failed or incomplete."
-        
-        # Max iterations to prevent infinite loops
-        for _ in range(10):
+        trace: list[ToolExecution] = []
+        final_report = "Analysis could not be completed."
+
+        for _ in range(self.max_iterations):
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 tools=tools_schema,
-                tool_choice="auto"
+                tool_choice="auto",
             )
-            
             message = response.choices[0].message
             messages.append(message)
-            
+
             if not message.tool_calls:
-                # Agent has finished and replied with regular text
-                final_report = message.content
+                final_report = message.content or "Analysis completed without a report."
                 break
-                
+
             for tool_call in message.tool_calls:
                 tool_calls_made += 1
-                function_name = tool_call.function.name
-                tool_args = json.loads(tool_call.function.arguments)
-                
-                tool = self.registry.get_tool(function_name)
-                if not tool:
-                    tool_result = {"error": f"Tool {function_name} not found"}
-                else:
-                    try:
-                        validated_args = tool.args_schema(**tool_args)
-                        tool_result = await tool.run(**validated_args.model_dump())
-                    except Exception as e:
-                        tool_result = {"error": str(e)}
-                
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "name": function_name,
-                    "content": json.dumps(tool_result)
-                })
-                
-        return AgentResponse(report=final_report, tool_calls_made=tool_calls_made)
+                name = tool_call.function.name
+                started = time.perf_counter()
+                error: Optional[str] = None
+
+                try:
+                    tool = self.registry.get_tool(name)
+                    if not tool:
+                        raise ValueError(f"Unknown tool: {name}")
+
+                    raw_args = json.loads(tool_call.function.arguments or "{}")
+                    validated_args = tool.args_schema.model_validate(raw_args)
+                    result = await tool.run(**validated_args.model_dump())
+                except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                    error = str(exc)
+                    result = {"error": error}
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+                    result = {"error": error}
+
+                duration_ms = (time.perf_counter() - started) * 1000
+                trace.append(
+                    ToolExecution(
+                        tool_name=name,
+                        status="failed" if error else "success",
+                        duration_ms=round(duration_ms, 2),
+                        error=error,
+                    )
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": name,
+                        "content": json.dumps(result, default=str),
+                    }
+                )
+        else:
+            final_report = (
+                "Analysis stopped after reaching the maximum agent iterations. "
+                "Use the execution trace to inspect incomplete tool execution."
+            )
+
+        return AgentResponse(
+            report=final_report,
+            tool_calls_made=tool_calls_made,
+            execution_trace=trace,
+        )
